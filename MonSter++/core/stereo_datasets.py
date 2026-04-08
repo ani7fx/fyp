@@ -17,10 +17,16 @@ from collections import defaultdict
 from typing import List, Optional
 from dataclasses import dataclass
 import cv2
-from pytorch3d.implicitron.dataset.types import (
-    FrameAnnotation as ImplicitronFrameAnnotation,
-    load_dataclass
-)
+try:
+    from pytorch3d.implicitron.dataset.types import (
+        FrameAnnotation as ImplicitronFrameAnnotation,
+        load_dataclass
+    )
+except ImportError:
+    ImplicitronFrameAnnotation = object
+
+    def load_dataclass(*args, **kwargs):
+        raise ImportError("pytorch3d is required for DynamicReplica dataset support.")
 
 import sys
 sys.path.append(os.getcwd())
@@ -282,45 +288,51 @@ class KITTI(StereoDataset):
         super(KITTI, self).__init__(aug_params, sparse=True, reader=frame_utils.readDispKITTI)
         assert os.path.exists(root)
 
-        root_12 = './kitti/2012/'
-        image1_list = sorted(glob(os.path.join(root_12, image_set, 'colored_0/*_10.png')))
-        image2_list = sorted(glob(os.path.join(root_12, image_set, 'colored_1/*_10.png')))
-        disp_list = sorted(glob(os.path.join(root_12, 'training', 'disp_occ/*_10.png'))) if image_set == 'training' else [osp.join(root, 'training/disp_occ/000085_10.png')]*len(image1_list)
+        root_12 = os.path.join(root, '2012')
+        image1_list = sorted(glob(os.path.join(root_12, image_set, 'colored_0', '*_10.png')))
+        image2_list = sorted(glob(os.path.join(root_12, image_set, 'colored_1', '*_10.png')))
+        disp_list = sorted(glob(os.path.join(root_12, 'training', 'disp_occ', '*_10.png'))) if image_set == 'training' else [osp.join(root_12, 'training', 'disp_occ', '000085_10.png')]*len(image1_list)
 
-        root_15 = './kitti/2015/'
-        image1_list += sorted(glob(os.path.join(root_15, image_set, 'image_2/*_10.png')))
-        image2_list += sorted(glob(os.path.join(root_15, image_set, 'image_3/*_10.png')))
-        disp_list += sorted(glob(os.path.join(root_15, 'training', 'disp_occ_0/*_10.png'))) if image_set == 'training' else [osp.join(root, 'training/disp_occ_0/000085_10.png')]*len(image1_list)
+        root_15 = os.path.join(root, '2015')
+        image1_list += sorted(glob(os.path.join(root_15, image_set, 'image_2', '*_10.png')))
+        image2_list += sorted(glob(os.path.join(root_15, image_set, 'image_3', '*_10.png')))
+        disp_list += sorted(glob(os.path.join(root_15, 'training', 'disp_occ_0', '*_10.png'))) if image_set == 'training' else [osp.join(root_15, 'training', 'disp_occ_0', '000085_10.png')]*len(image1_list)
 
         for idx, (img1, img2, disp) in enumerate(zip(image1_list, image2_list, disp_list)):
             self.image_list += [ [img1, img2] ]
             self.disparity_list += [ disp ]
 
 class KITTI_2012(StereoDataset):
-    def __init__(self, aug_params=None, root='/data/StereoData/kitti', image_set='training'):
+    def __init__(self, aug_params=None, root='./kitti/2012', image_set='training'):
         super(KITTI_2012, self).__init__(aug_params, sparse=True, reader=frame_utils.readDispKITTI)
         assert os.path.exists(root)
 
-        root_12 = '/data/StereoData/kitti/2012/'  
-        image1_list = sorted(glob(os.path.join(root_12, image_set, 'colored_0/*_10.png')))
-        image2_list = sorted(glob(os.path.join(root_12, image_set, 'colored_1/*_10.png')))
-        disp_list = sorted(glob(os.path.join(root_12, 'training', 'disp_noc/*_10.png'))) if image_set == 'training' else [osp.join(root, 'training/disp_occ/000085_10.png')]*len(image1_list)
+        image1_list = sorted(glob(os.path.join(root, image_set, 'colored_0', '*_10.png')))
+        image2_list = sorted(glob(os.path.join(root, image_set, 'colored_1', '*_10.png')))
+        disp_list = sorted(glob(os.path.join(root, 'training', 'disp_noc', '*_10.png'))) if image_set == 'training' else [osp.join(root, 'training', 'disp_occ', '000085_10.png')]*len(image1_list)
 
         for idx, (img1, img2, disp) in enumerate(zip(image1_list, image2_list, disp_list)):
             self.image_list += [ [img1, img2] ]
             self.disparity_list += [ disp ]
 
 class KITTI_2015(StereoDataset):
-    def __init__(self, aug_params=None, root='/data/StereoData/kitti', image_set='training'):
+    def __init__(self, aug_params=None, root='./kitti/2015', image_set='training'):
         super(KITTI_2015, self).__init__(aug_params, sparse=True, reader=frame_utils.readDispKITTI)
         assert os.path.exists(root)
 
-        root_15 = '/data/StereoData/kitti/2015/'  
-        image1_list = sorted(glob(os.path.join(root_15, image_set, 'image_2/*_10.png')))
-        image2_list = sorted(glob(os.path.join(root_15, image_set, 'image_3/*_10.png')))
-        disp_list = sorted(glob(os.path.join(root_15, 'training', 'disp_noc_0/*_10.png'))) if image_set == 'training' else [osp.join(root, 'training/disp_occ_0/000085_10.png')]*len(image1_list)
+        image1_map = {Path(p).name: p for p in glob(os.path.join(root, image_set, 'image_2', '*_10.png'))}
+        image2_map = {Path(p).name: p for p in glob(os.path.join(root, image_set, 'image_3', '*_10.png'))}
+        if image_set == 'training':
+            disp_map = {Path(p).name: p for p in glob(os.path.join(root, 'training', 'disp_noc_0', '*_10.png'))}
+        else:
+            disp_map = {name: osp.join(root, 'training', 'disp_occ_0', '000085_10.png') for name in image1_map.keys()}
 
-        for idx, (img1, img2, disp) in enumerate(zip(image1_list, image2_list, disp_list)):
+        common_names = sorted(set(image1_map) & set(image2_map) & set(disp_map))
+
+        for name in common_names:
+            img1 = image1_map[name]
+            img2 = image2_map[name]
+            disp = disp_map[name]
             self.image_list += [ [img1, img2] ]
             self.disparity_list += [ disp ]
 

@@ -15,8 +15,12 @@ import Imath
 import math
 import h5py
 import torch
-from pytorch3d.utils import opencv_from_cameras_projection
-from pytorch3d.renderer.cameras import PerspectiveCameras
+try:
+    from pytorch3d.utils import opencv_from_cameras_projection
+    from pytorch3d.renderer.cameras import PerspectiveCameras
+except ImportError:
+    opencv_from_cameras_projection = None
+    PerspectiveCameras = None
 
 def exr2hdr(exrpath):
     File = OpenEXR.InputFile(exrpath)

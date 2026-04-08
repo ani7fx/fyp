@@ -1,6 +1,5 @@
 from __future__ import print_function, division
 import sys
-sys.path.append('core')
 import os
 import argparse
 import time
@@ -8,6 +7,10 @@ import logging
 import numpy as np
 import torch
 from tqdm import tqdm
+from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parent
+sys.path.append(str(PROJECT_DIR / 'core'))
 from monster import Monster, autocast
 
 import stereo_datasets as datasets
@@ -96,12 +99,12 @@ def validate_eth3d(model, iters=32, mixed_prec=False):
 
 
 @torch.no_grad()
-def validate_kitti(model, iters=32, mixed_prec=False):
+def validate_kitti(model, iters=32, mixed_prec=False, kitti_root='./kitti/2015'):
     """ Peform validation using the KITTI-2015 (train) split """
     model.eval()
     # aug_params = {'crop_size': list([540, 960])}
     aug_params = {}
-    val_dataset = datasets.KITTI_2015(aug_params, image_set='training')
+    val_dataset = datasets.KITTI_2015(aug_params, root=kitti_root, image_set='training')
     torch.backends.cudnn.benchmark = True
 
     out_list, epe_list, elapsed_list = [], [], []
@@ -409,6 +412,7 @@ if __name__ == '__main__':
     parser.add_argument('--slow_fast_gru', action='store_true', help="iterate the low-res GRUs more frequently")
     parser.add_argument('--n_gru_layers', type=int, default=3, help="number of hidden GRU levels")
     parser.add_argument('--max_disp', type=int, default=416, help="max disp of geometry encoding volume")
+    parser.add_argument('--kitti_root', type=str, default='./kitti/2015', help='path to KITTI 2015 stereo data root')
     args = parser.parse_args()
 
     model = torch.nn.DataParallel(Monster(args), device_ids=[0])
@@ -453,7 +457,7 @@ if __name__ == '__main__':
         validate_eth3d(model, iters=args.valid_iters, mixed_prec=use_mixed_precision)
 
     elif args.dataset == 'kitti':
-        validate_kitti(model, iters=args.valid_iters, mixed_prec=use_mixed_precision)
+        validate_kitti(model, iters=args.valid_iters, mixed_prec=use_mixed_precision, kitti_root=args.kitti_root)
 
     elif args.dataset in [f"middlebury_{s}" for s in 'FHQ']:
         validate_middlebury(model, iters=args.valid_iters, resolution=args.dataset[-1], split='MiddEval3', mixed_prec=use_mixed_precision)

@@ -40,7 +40,35 @@ def gray_2_colormap_np(img, cmap = 'rainbow', max = None):
 
     return colormap
 
-def sequence_loss(disp_preds, disp_init_pred, disp_gt, valid, loss_gamma=0.9, max_disp=192):
+def charbonnier(x, epsilon=1e-3):
+    return torch.sqrt(x**2 + epsilon**2)
+
+
+def gradient_loss(pred, gt, valid_mask, epsilon=1e-3):
+    pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
+    pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+    gt_dx = gt[:, :, :, 1:] - gt[:, :, :, :-1]
+    gt_dy = gt[:, :, 1:, :] - gt[:, :, :-1, :]
+
+    valid_x = valid_mask[:, :, :, 1:] & valid_mask[:, :, :, :-1]
+    valid_y = valid_mask[:, :, 1:, :] & valid_mask[:, :, :-1, :]
+
+    loss_dx = charbonnier(pred_dx - gt_dx, epsilon=epsilon)
+    loss_dy = charbonnier(pred_dy - gt_dy, epsilon=epsilon)
+
+    grad_x = loss_dx[valid_x].mean() if valid_x.any() else pred.new_tensor(0.0)
+    grad_y = loss_dy[valid_y].mean() if valid_y.any() else pred.new_tensor(0.0)
+    return (grad_x + grad_y) / 2
+
+
+def edge_aware_loss(pred, gt, valid_mask, lambda_grad=0.1, epsilon=1e-3):
+    valid_sum = valid_mask.float().sum().clamp_min(1.0)
+    base = (charbonnier(pred - gt, epsilon=epsilon) * valid_mask.float()).sum() / valid_sum
+    grad = gradient_loss(pred, gt, valid_mask, epsilon=epsilon)
+    return base + lambda_grad * grad, base, grad
+
+
+def sequence_loss(disp_preds, disp_init_pred, disp_gt, valid, loss_gamma=0.9, max_disp=192, lambda_grad=0.1):
     """ Loss function defined over sequence of flow predictions """
 
     n_predictions = len(disp_preds)
@@ -54,13 +82,16 @@ def sequence_loss(disp_preds, disp_init_pred, disp_gt, valid, loss_gamma=0.9, ma
     # quantile = torch.quantile((disp_init_pred - disp_gt).abs(), 0.9)
     init_valid = valid.bool() & ~torch.isnan(disp_init_pred)#  & ((disp_init_pred - disp_gt).abs() < quantile)
     disp_loss += 1.0 * F.smooth_l1_loss(disp_init_pred[init_valid], disp_gt[init_valid], reduction='mean')
-    for i in range(n_predictions):
+    for i in range(max(n_predictions - 1, 0)):
         adjusted_loss_gamma = loss_gamma**(15/(n_predictions - 1))
         i_weight = adjusted_loss_gamma**(n_predictions - i - 1)
         i_loss = (disp_preds[i] - disp_gt).abs()
         # quantile = torch.quantile(i_loss, 0.9)
         assert i_loss.shape == valid.shape, [i_loss.shape, valid.shape, disp_gt.shape, disp_preds[i].shape]
         disp_loss += i_weight * i_loss[valid.bool() & ~torch.isnan(i_loss)].mean()
+
+    final_edge_loss, final_base_loss, final_grad_loss = edge_aware_loss(disp_preds[-1], disp_gt, valid.bool(), lambda_grad=lambda_grad)
+    disp_loss += final_edge_loss
 
     epe = torch.sum((disp_preds[-1] - disp_gt)**2, dim=1).sqrt()
     epe = epe.view(-1)[valid.view(-1)]
@@ -73,6 +104,8 @@ def sequence_loss(disp_preds, disp_init_pred, disp_gt, valid, loss_gamma=0.9, ma
         'train/1px': (epe < 1).float().mean(),
         'train/3px': (epe < 3).float().mean(),
         'train/5px': (epe < 5).float().mean(),
+        'train/final_charbonnier': final_base_loss.detach(),
+        'train/final_grad_loss': final_grad_loss.detach(),
     }
     return disp_loss, metrics
 
@@ -178,7 +211,7 @@ def main(cfg):
             with accelerator.autocast():
                 disp_init_pred, disp_preds, depth_mono = model(left, right, iters=cfg.train_iters)
 
-            loss, metrics = sequence_loss(disp_preds, disp_init_pred, disp_gt, valid, max_disp=cfg.max_disp)
+            loss, metrics = sequence_loss(disp_preds, disp_init_pred, disp_gt, valid, max_disp=cfg.max_disp, lambda_grad=getattr(cfg, 'lambda_grad', 0.1))
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
