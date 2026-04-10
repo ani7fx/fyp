@@ -3,7 +3,9 @@ import copy
 import json
 import math
 import random
+import csv
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -158,6 +160,23 @@ def save_checkpoint(path, refinement_module, optimizer, scheduler, step, best_lo
     torch.save(payload, path)
 
 
+def append_training_log(csv_path, step, total_loss, base_loss, grad_loss, learning_rate):
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = csv_path.exists()
+    with csv_path.open("a", newline="") as handle:
+        writer = csv.writer(handle)
+        if not file_exists:
+            writer.writerow(["step", "total_loss", "base_loss", "grad_loss", "learning_rate", "timestamp"])
+        writer.writerow([
+            step,
+            f"{total_loss:.8f}",
+            f"{base_loss:.8f}",
+            f"{grad_loss:.8f}",
+            f"{learning_rate:.10f}",
+            datetime.now().isoformat(timespec="seconds"),
+        ])
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -185,12 +204,28 @@ def main():
     print(f"Refinement module trainable parameters: {parameter_count}")
     print(f"KITTI 2015 training samples available: {len(dataset)}")
 
+    latest_checkpoint_path = args.save_dir / "latest.pth"
+    training_log_path = args.save_dir / "training_log.csv"
     best_loss = math.inf
+    start_step = 0
+
+    if latest_checkpoint_path.exists():
+        latest_checkpoint = torch.load(latest_checkpoint_path, map_location=device)
+        refinement_module.load_state_dict(latest_checkpoint["refinement_module"], strict=True)
+        optimizer.load_state_dict(latest_checkpoint["optimizer"])
+        scheduler.load_state_dict(latest_checkpoint["scheduler"])
+        start_step = int(latest_checkpoint.get("step", 0))
+        best_loss = float(latest_checkpoint.get("best_loss", math.inf))
+        print(f"Resuming training from checkpoint: {latest_checkpoint_path}")
+        print(f"Resuming from step {start_step} with best_loss={best_loss:.6f}")
+    else:
+        print("No latest checkpoint found. Starting fresh training run.")
+
     first_batch = None
     loader_iter = iter(dataloader)
     loss_history = []
 
-    for step in range(args.max_steps):
+    for step in range(start_step, args.max_steps):
         if args.repeat_first_batch and first_batch is not None:
             batch = first_batch
         else:
@@ -244,17 +279,21 @@ def main():
                 print(f"  {name}: {status}")
 
         if (step + 1) % args.log_every == 0 or step == 0 or step == args.max_steps - 1:
+            learning_rate = scheduler.get_last_lr()[0]
             print(
                 f"step={step + 1}/{args.max_steps} "
                 f"total_loss={loss_value:.6f} "
                 f"base_loss={base_value:.6f} "
                 f"grad_loss={grad_value:.6f} "
-                f"lr={scheduler.get_last_lr()[0]:.8f}"
+                f"lr={learning_rate:.8f}"
             )
+            append_training_log(training_log_path, step + 1, loss_value, base_value, grad_value, learning_rate)
 
         if loss_value < best_loss:
             best_loss = loss_value
             save_checkpoint(args.save_dir / "refinement_module_best.pth", refinement_module, optimizer, scheduler, step + 1, best_loss)
+
+        save_checkpoint(latest_checkpoint_path, refinement_module, optimizer, scheduler, step + 1, best_loss)
 
         if (step + 1) % args.save_every == 0:
             save_checkpoint(args.save_dir / f"refinement_module_step_{step + 1}.pth", refinement_module, optimizer, scheduler, step + 1, best_loss)
