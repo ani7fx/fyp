@@ -14,7 +14,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 
 from core.monster import Monster
-from refinement_module import LightweightRefinementModule
+from refinement_module import ConfigurableRefinementModule, LightweightRefinementModule, LargeRefinementModule
 import core.stereo_datasets as datasets
 
 
@@ -65,6 +65,11 @@ def parse_args():
     parser.add_argument("--depth_anything_ckpt", type=Path, default=project_dir / "checkpoints" / "depth_anything_v2_vitl.pth")
     parser.add_argument("--kitti_root", type=Path, default=project_dir / "datasets" / "data_scene_flow")
     parser.add_argument("--save_dir", type=Path, default=project_dir / "checkpoints")
+    parser.add_argument("--run_name", type=str, default="refinement_module")
+    parser.add_argument("--final_ckpt_name", type=str, default="refinement_module_best.pth")
+    parser.add_argument("--resume_ckpt", type=Path, default=None, help="Optional checkpoint to resume from explicitly.")
+    parser.add_argument("--arch", type=str, default="light", choices=["light", "large", "custom"])
+    parser.add_argument("--refinement_channels", nargs="+", type=int, default=None, help="Only used with --arch custom, e.g. 4 64 128 64 1")
     parser.add_argument("--batch_size", type=int, default=12)
     parser.add_argument("--max_steps", type=int, default=10000)
     parser.add_argument("--save_every", type=int, default=2000)
@@ -134,6 +139,18 @@ def build_dataloader(args):
     return dataset, loader
 
 
+def build_refinement_module(args):
+    if args.arch == "light":
+        return LightweightRefinementModule()
+    if args.arch == "large":
+        return LargeRefinementModule()
+
+    channels = args.refinement_channels
+    if channels is None:
+        raise ValueError("--refinement_channels is required when --arch custom is used")
+    return ConfigurableRefinementModule(channels)
+
+
 def get_valid_mask(disp_gt, valid, max_disp):
     mag = torch.sum(disp_gt**2, dim=1).sqrt()
     return ((valid >= 0.5) & (mag < max_disp)).unsqueeze(1)
@@ -188,7 +205,7 @@ def main():
 
     dataset, dataloader = build_dataloader(args)
     model = load_monster(args, device)
-    refinement_module = LightweightRefinementModule().to(device)
+    refinement_module = build_refinement_module(args).to(device)
 
     optimizer = AdamW(refinement_module.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = OneCycleLR(
@@ -204,19 +221,26 @@ def main():
     print(f"Refinement module trainable parameters: {parameter_count}")
     print(f"KITTI 2015 training samples available: {len(dataset)}")
 
-    latest_checkpoint_path = args.save_dir / "latest.pth"
-    training_log_path = args.save_dir / "training_log.csv"
+    latest_checkpoint_path = args.save_dir / f"{args.run_name}_latest.pth"
+    best_checkpoint_path = args.save_dir / args.final_ckpt_name
+    training_log_path = args.save_dir / f"{args.run_name}_training_log.csv"
     best_loss = math.inf
     start_step = 0
 
-    if latest_checkpoint_path.exists():
-        latest_checkpoint = torch.load(latest_checkpoint_path, map_location=device)
+    checkpoint_to_resume = None
+    if args.resume_ckpt is not None:
+        checkpoint_to_resume = args.resume_ckpt
+    elif latest_checkpoint_path.exists():
+        checkpoint_to_resume = latest_checkpoint_path
+
+    if checkpoint_to_resume is not None:
+        latest_checkpoint = torch.load(checkpoint_to_resume, map_location=device)
         refinement_module.load_state_dict(latest_checkpoint["refinement_module"], strict=True)
         optimizer.load_state_dict(latest_checkpoint["optimizer"])
         scheduler.load_state_dict(latest_checkpoint["scheduler"])
         start_step = int(latest_checkpoint.get("step", 0))
         best_loss = float(latest_checkpoint.get("best_loss", math.inf))
-        print(f"Resuming training from checkpoint: {latest_checkpoint_path}")
+        print(f"Resuming training from checkpoint: {checkpoint_to_resume}")
         print(f"Resuming from step {start_step} with best_loss={best_loss:.6f}")
     else:
         print("No latest checkpoint found. Starting fresh training run.")
@@ -291,12 +315,19 @@ def main():
 
         if loss_value < best_loss:
             best_loss = loss_value
-            save_checkpoint(args.save_dir / "refinement_module_best.pth", refinement_module, optimizer, scheduler, step + 1, best_loss)
+            save_checkpoint(best_checkpoint_path, refinement_module, optimizer, scheduler, step + 1, best_loss)
 
         save_checkpoint(latest_checkpoint_path, refinement_module, optimizer, scheduler, step + 1, best_loss)
 
         if (step + 1) % args.save_every == 0:
-            save_checkpoint(args.save_dir / f"refinement_module_step_{step + 1}.pth", refinement_module, optimizer, scheduler, step + 1, best_loss)
+            save_checkpoint(
+                args.save_dir / f"{args.run_name}_step_{step + 1}.pth",
+                refinement_module,
+                optimizer,
+                scheduler,
+                step + 1,
+                best_loss,
+            )
 
     final_summary = {
         "steps": args.max_steps,
@@ -305,8 +336,14 @@ def main():
         "best_loss": best_loss,
         "refinement_parameters": parameter_count,
         "repeat_first_batch": args.repeat_first_batch,
+        "run_name": args.run_name,
+        "arch": args.arch,
+        "final_checkpoint": str(best_checkpoint_path),
+        "latest_checkpoint": str(latest_checkpoint_path),
+        "training_log": str(training_log_path),
+        "lambda_grad": args.lambda_grad,
     }
-    summary_path = args.save_dir / "refinement_module_last_run.json"
+    summary_path = args.save_dir / f"{args.run_name}_last_run.json"
     summary_path.write_text(json.dumps(final_summary, indent=2))
     print(json.dumps(final_summary, indent=2))
 
